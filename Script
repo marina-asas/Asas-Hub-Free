@@ -1,0 +1,953 @@
+-- language: Lua, runtime: Roblox executor
+-- Rivals menu: AC bypass + 4 tabs + hitbox + rage + teleport + whitelist + keybinds + minimize/close.
+
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+-- ========== AC BYPASS — auto-run, boot-time ==========
+local function RunACBypass()
+    local ok, err = pcall(function()
+        local ACBypass = {}
+        ACBypass.__index = ACBypass
+        local PlayersAC           = cloneref(game:GetService('Players'))
+        local ReplicatedStorageAC = cloneref(game:GetService('ReplicatedStorage'))
+        local ReplicatedFirstAC   = cloneref(game:GetService('ReplicatedFirst'))
+        local LocalPlayerAC       = PlayersAC.LocalPlayer
+        local stateAC             = { bypassed = false }
+        local kExpectedScripts    = {
+            [1914481512] = 'Root', [1936447744] = 'ReplicatedController',
+            [3892767096] = 'MiscellaneousController', [337076960] = 'LocalScript3',
+            [2191862192] = 'ClientFighter',
+        }
+        -- >>> PASTE AC BYPASS REMAINDER HERE <<<
+    end)
+    if not ok then warn("[Rivals Menu] AC bypass failed: " .. tostring(err))
+    else print("[Rivals Menu] AC bypass loaded") end
+end
+RunACBypass()
+
+-- ========== WHITELIST ==========
+local Whitelist = {}
+Whitelist._set = {}
+function Whitelist.Add(name)
+    name = tostring(name); if name == "" then return end
+    Whitelist._set[name:lower()] = name
+end
+function Whitelist.Remove(name) Whitelist._set[tostring(name):lower()] = nil end
+function Whitelist.Has(plr)
+    if type(plr) == "string" then return Whitelist._set[plr:lower()] ~= nil end
+    return Whitelist._set[plr.Name:lower()] ~= nil
+end
+function Whitelist.List()
+    local a = {}; for _, n in pairs(Whitelist._set) do table.insert(a, n) end
+    table.sort(a); return a
+end
+
+-- ========== HITBOX ==========
+local Hitbox = {}
+Hitbox.Enabled = false; Hitbox.Size = 5; Hitbox.SKIP_TEAM = true
+Hitbox._originals = {}; Hitbox._conn = nil
+local function isTeamExcluded(plr)
+    if plr == LocalPlayer then return true end
+    if not Hitbox.SKIP_TEAM then return false end
+    if LocalPlayer.Team and plr.Team then return LocalPlayer.Team == plr.Team end
+    return false
+end
+local function applyHitbox(model, size)
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local n = part.Name
+            if n == "HumanoidRootPart" or n == "Torso" or n == "UpperTorso"
+               or n == "LowerTorso" or n == "Hitbox" or n == "RootPart" then
+                if not Hitbox._originals[part] then
+                    Hitbox._originals[part] = { size = part.Size, massless = part.Massless, trans = part.Transparency }
+                end
+                local o = Hitbox._originals[part].size
+                part.Size = Vector3.new(math.max(o.X, size), math.max(o.Y, size), math.max(o.Z, size))
+                part.Massless = true; part.CanCollide = false; part.Transparency = 0.7
+            end
+        end
+    end
+end
+local function restoreHitbox(model)
+    for _, part in ipairs(model:GetDescendants()) do
+        local o = Hitbox._originals[part]
+        if o then
+            part.Size = o.size; part.Massless = o.massless; part.Transparency = o.trans
+            part.CanCollide = true; Hitbox._originals[part] = nil
+        end
+    end
+end
+function Hitbox.Start()
+    if Hitbox.Enabled then return end
+    Hitbox.Enabled = true
+    Hitbox._conn = RunService.Heartbeat:Connect(function()
+        if not Hitbox.Enabled then return end
+        for _, plr in ipairs(Players:GetPlayers()) do
+            local char = plr.Character
+            if isTeamExcluded(plr) or Whitelist.Has(plr) then
+                if char then restoreHitbox(char) end
+            elseif char and char:FindFirstChildOfClass("Humanoid") then
+                applyHitbox(char, Hitbox.Size)
+            end
+        end
+    end)
+end
+function Hitbox.Stop()
+    Hitbox.Enabled = false
+    if Hitbox._conn then Hitbox._conn:Disconnect(); Hitbox._conn = nil end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr.Character then restoreHitbox(plr.Character) end
+    end
+end
+function Hitbox.SetSize(n) Hitbox.Size = math.clamp(n, 2, 30) end
+
+-- ========== RAGE ==========
+local Rage = {}
+Rage.Enabled = false; Rage.Interval = 0.4; Rage.BehindDuration = 0.8
+Rage.Distance = 3; Rage.UseTeams = true
+Rage._conn = nil; Rage._nextRun = 0; Rage._pinning = false
+local function candidateTargets()
+    local list = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            if hum and hum.Health > 0 and hrp then
+                local teamOK = true
+                if Rage.UseTeams and LocalPlayer.Team and plr.Team then
+                    teamOK = plr.Team ~= LocalPlayer.Team
+                end
+                if teamOK and not Whitelist.Has(plr) then table.insert(list, plr) end
+            end
+        end
+    end
+    return list
+end
+local function behindCFrame(targetHRP)
+    return targetHRP.CFrame * CFrame.new(0, 0, Rage.Distance)
+end
+local function doRageTick()
+    if not Rage.Enabled or Rage._pinning then return end
+    local targets = candidateTargets()
+    if #targets == 0 then return end
+    local target = targets[math.random(1, #targets)]
+    local myChar = LocalPlayer.Character; if not myChar then return end
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart"); if not myHRP then return end
+    local targetHRP = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then return end
+    Rage._pinning = true
+    local pinTarget = target
+    local pinEnd = tick() + Rage.BehindDuration
+    local pinConn
+    pinConn = RunService.Heartbeat:Connect(function()
+        if not Rage.Enabled or tick() >= pinEnd then
+            Rage._pinning = false; pinConn:Disconnect(); return
+        end
+        local c = LocalPlayer.Character
+        local hrp = c and c:FindFirstChild("HumanoidRootPart")
+        local thrp = pinTarget.Character and pinTarget.Character:FindFirstChild("HumanoidRootPart")
+        if hrp and thrp then hrp.CFrame = behindCFrame(thrp) end
+    end)
+end
+function Rage.Start()
+    if Rage.Enabled then return end
+    Rage.Enabled = true; Rage._nextRun = tick()
+    Rage._conn = RunService.Heartbeat:Connect(function()
+        if not Rage.Enabled then return end
+        if tick() >= Rage._nextRun then
+            Rage._nextRun = tick() + Rage.Interval
+            doRageTick()
+        end
+    end)
+end
+function Rage.Stop()
+    Rage.Enabled = false; Rage._pinning = false
+    if Rage._conn then Rage._conn:Disconnect(); Rage._conn = nil end
+end
+
+-- ========== TELEPORT ==========
+local Teleport = {}
+Teleport._pinConn = nil
+function Teleport.GetTargets()
+    local list = {}
+    local myChar = LocalPlayer.Character
+    local myPos = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        and myChar.HumanoidRootPart.Position or Vector3.zero
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and plr.Character then
+            local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+            local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+            if hrp and hum and hum.Health > 0 then
+                table.insert(list, {
+                    player = plr,
+                    distance = (hrp.Position - myPos).Magnitude,
+                })
+            end
+        end
+    end
+    table.sort(list, function(a, b) return a.distance < b.distance end)
+    return list
+end
+function Teleport.GoTo(plr)
+    if not plr or plr == LocalPlayer then return false end
+    local myChar = LocalPlayer.Character
+    local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP then return false end
+    local targetHRP = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+    if not targetHRP then return false end
+    myHRP.CFrame = targetHRP.CFrame * CFrame.new(0, 0, 3)
+    return true
+end
+
+-- ======================================================================
+-- RIVALS SCRIPTS
+-- ======================================================================
+local Scripts = {
+    { name = "UE Cracked", type = "inline", source = function()
+        local url = "https://raw.githubusercontent.com/Kiciahooklua/UnnamedEnhancementsFree/refs/heads/main/UeCrack-2-patched.lua"
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if not ok or type(body) ~= "string" or #body == 0 or body:find("404: Not Found") then
+            warn("[Rivals Menu] UE Cracked: fetch failed (" .. tostring(body) .. ")")
+            return
+        end
+        local chunk, compileErr = loadstring(body)
+        if not chunk then
+            warn("[Rivals Menu] UE Cracked: compile failed — " .. tostring(compileErr))
+            return
+        end
+        local ran, err = pcall(chunk)
+        if not ran then warn("[Rivals Menu] UE Cracked: runtime error — " .. tostring(err))
+        else print("[Rivals Menu] UE Cracked: loaded") end
+    end },
+    { name = "Kiciahook Cracked", type = "loadstring", source = function()
+        loadstring(game:HttpGet("https://raw.githubusercontent.com/finwo67/finhub-skid-kiciahook/refs/heads/main/kiciahook"))()
+    end },
+    { name = "Fast Melee Rapid Fire", type = "inline", source = function()
+        if game.GameId == 6035872082 then
+            local Storage = game:GetService("ReplicatedStorage")
+            local Items = require(Storage.Modules.ItemLibrary).Items
+            local gunExceptions = { ["Sniper"] = false, ["Crossbow"] = false, ["Bow"] = false, ["RPG"] = false }
+            for name, data in pairs(Items) do
+                if typeof(data) == "table" and not gunExceptions[name] then
+                    if data.ShootSpread then data.ShootSpread = 0 end
+                    if data.ShootAccuracy then data.ShootAccuracy = 0 end
+                    if data.ShootRecoil then data.ShootRecoil = 0 end
+                    if data.ShootCooldown then data.ShootCooldown = 0.001 end
+                    if data.ShootBurstCooldown then data.ShootBurstCooldown = 0.001 end
+                end
+            end
+            for name, data in pairs(Items) do
+                if typeof(data) == "table" then
+                    if data.AttackCooldown then data.AttackCooldown = 0.001 end
+                    if data.SwingCooldown then data.SwingCooldown = 0.001 end
+                    if data.MeleeCooldown then data.MeleeCooldown = 0.001 end
+                    if data.Cooldown then data.Cooldown = 0.001 end
+                    if data.RecoveryTime then data.RecoveryTime = 0.001 end
+                    if data.ResetTime then data.ResetTime = 0.001 end
+                end
+            end
+            print("Made by Yokai.win and mangov3 :)")
+        end
+    end },
+    { name = "UE Counter", type = "loadstring", source = function()
+        loadstring(game:HttpGet("https://vault.pandauth.com/vss/34a924a96134a9c9"))()
+    end },
+    { name = "RCLC Paid", type = "loadstring", source = function()
+        loadstring(game:HttpGet("https://api.luarmor.net/files/v4/loaders/be6ad70a193ee78ffb514ebe5e1a8a8e.lua"))()
+    end },
+    { name = "w7w7 lua", type = "loadstring", source = function()
+        loadstring(game:HttpGet("https://pastefy.app/XjnTvDVM/raw"))()
+    end },
+}
+
+-- ======================================================================
+-- GUI
+-- ======================================================================
+local existing = CoreGui:FindFirstChild("RivalsScriptMenu")
+if existing then existing:Destroy() end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "RivalsScriptMenu"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.Parent = CoreGui
+
+local MenuState = { open = false, closed = false, minimized = false }
+
+local Main = Instance.new("Frame")
+Main.Size = UDim2.new(0, 440, 0, 60)
+Main.Position = UDim2.new(0, 20, 0, 20)
+Main.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
+Main.BorderSizePixel = 0
+Main.ClipsDescendants = true
+Main.Parent = ScreenGui
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 8)
+local Stroke = Instance.new("UIStroke")
+Stroke.Color = Color3.fromRGB(50, 50, 60)
+Stroke.Parent = Main
+
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 60)
+TitleBar.BackgroundTransparency = 1
+TitleBar.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -140, 0, 30)
+Title.Position = UDim2.new(0, 14, 0, 8)
+Title.BackgroundTransparency = 1
+Title.Text = "Rivals • Script Menu"
+Title.TextColor3 = Color3.fromRGB(230, 230, 240)
+Title.TextSize = 16
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = TitleBar
+
+local SubTitle = Instance.new("TextLabel")
+SubTitle.Size = UDim2.new(1, -140, 0, 16)
+SubTitle.Position = UDim2.new(0, 14, 0, 32)
+SubTitle.BackgroundTransparency = 1
+SubTitle.Text = "AC: auto • [Y] Rage • [K] TP"
+SubTitle.TextColor3 = Color3.fromRGB(140, 140, 160)
+SubTitle.TextSize = 11
+SubTitle.Font = Enum.Font.Gotham
+SubTitle.TextXAlignment = Enum.TextXAlignment.Left
+SubTitle.Parent = TitleBar
+
+local MinimizeBtn = Instance.new("TextButton")
+MinimizeBtn.Size = UDim2.new(0, 28, 0, 28)
+MinimizeBtn.Position = UDim2.new(1, -104, 0, 16)
+MinimizeBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+MinimizeBtn.Text = "—"
+MinimizeBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
+MinimizeBtn.TextSize = 16
+MinimizeBtn.Font = Enum.Font.GothamBold
+MinimizeBtn.AutoButtonColor = false
+MinimizeBtn.Parent = TitleBar
+Instance.new("UICorner", MinimizeBtn).CornerRadius = UDim.new(0, 6)
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 28, 0, 28)
+CloseBtn.Position = UDim2.new(1, -70, 0, 16)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(60, 30, 30)
+CloseBtn.Text = "×"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 180, 180)
+CloseBtn.TextSize = 16
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.AutoButtonColor = false
+CloseBtn.Parent = TitleBar
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(0, 28, 0, 28)
+ToggleBtn.Position = UDim2.new(1, -36, 0, 16)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+ToggleBtn.Text = "▾"
+ToggleBtn.TextColor3 = Color3.fromRGB(200, 200, 220)
+ToggleBtn.TextSize = 16
+ToggleBtn.Font = Enum.Font.GothamBold
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.Parent = TitleBar
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+local TabBar = Instance.new("Frame")
+TabBar.Size = UDim2.new(1, -16, 0, 30)
+TabBar.Position = UDim2.new(0, 8, 0, 64)
+TabBar.BackgroundTransparency = 1
+TabBar.Parent = Main
+local TabLayout = Instance.new("UIListLayout")
+TabLayout.FillDirection = Enum.FillDirection.Horizontal
+TabLayout.Padding = UDim.new(0, 6)
+TabLayout.Parent = TabBar
+
+local function makeTab(name, order)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, 90, 1, 0)
+    btn.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+    btn.Text = name
+    btn.TextColor3 = Color3.fromRGB(200, 200, 220)
+    btn.TextSize = 11
+    btn.Font = Enum.Font.GothamBold
+    btn.AutoButtonColor = false
+    btn.LayoutOrder = order
+    btn.Parent = TabBar
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+    return btn
+end
+
+local RivalsTabBtn    = makeTab("Rivals", 1)
+local UniversalTabBtn = makeTab("Universal", 2)
+local WhitelistTabBtn = makeTab("Whitelist", 3)
+local TeleportTabBtn  = makeTab("Teleport", 4)
+
+local Body = Instance.new("Frame")
+Body.Size = UDim2.new(1, -16, 0, 0)
+Body.Position = UDim2.new(0, 8, 0, 100)
+Body.BackgroundTransparency = 1
+Body.Parent = Main
+
+local RivalsPage = Instance.new("Frame")
+RivalsPage.Size = UDim2.new(1, 0, 1, 0)
+RivalsPage.BackgroundTransparency = 1
+RivalsPage.Parent = Body
+local RivalsList = Instance.new("UIListLayout")
+RivalsList.Padding = UDim.new(0, 6)
+RivalsList.Parent = RivalsPage
+
+local UniversalPage = Instance.new("Frame")
+UniversalPage.Size = UDim2.new(1, 0, 1, 0)
+UniversalPage.BackgroundTransparency = 1
+UniversalPage.Visible = false
+UniversalPage.Parent = Body
+local UnivList = Instance.new("UIListLayout")
+UnivList.Padding = UDim.new(0, 8)
+UnivList.Parent = UniversalPage
+
+local WhitelistPage = Instance.new("Frame")
+WhitelistPage.Size = UDim2.new(1, 0, 1, 0)
+WhitelistPage.BackgroundTransparency = 1
+WhitelistPage.Visible = false
+WhitelistPage.Parent = Body
+
+local TeleportPage = Instance.new("Frame")
+TeleportPage.Size = UDim2.new(1, 0, 1, 0)
+TeleportPage.BackgroundTransparency = 1
+TeleportPage.Visible = false
+TeleportPage.Parent = Body
+
+local currentPage = RivalsPage
+local function setPage(page, btn)
+    currentPage.Visible = false
+    page.Visible = true
+    currentPage = page
+    for _, b in ipairs({ RivalsTabBtn, UniversalTabBtn, WhitelistTabBtn, TeleportTabBtn }) do
+        TweenService:Create(b, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(28, 28, 34) }):Play()
+        b.TextColor3 = Color3.fromRGB(200, 200, 220)
+    end
+    TweenService:Create(btn, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(60, 50, 110) }):Play()
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+end
+RivalsTabBtn.MouseButton1Click:Connect(function() setPage(RivalsPage, RivalsTabBtn) end)
+UniversalTabBtn.MouseButton1Click:Connect(function() setPage(UniversalPage, UniversalTabBtn) end)
+WhitelistTabBtn.MouseButton1Click:Connect(function() setPage(WhitelistPage, WhitelistTabBtn) end)
+TeleportTabBtn.MouseButton1Click:Connect(function() setPage(TeleportPage, TeleportTabBtn) end)
+
+-- ========== RIVALS PAGE ==========
+local Selected = nil
+local Rows = {}
+local function deselectAll()
+    for _, b in ipairs(Rows) do
+        TweenService:Create(b, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(28, 28, 34) }):Play()
+        b.TextColor3 = Color3.fromRGB(210, 210, 225)
+    end
+end
+
+for i, entry in ipairs(Scripts) do
+    local Row = Instance.new("TextButton")
+    Row.Size = UDim2.new(1, 0, 0, 36)
+    Row.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+    Row.BorderSizePixel = 0
+    Row.Text = "  " .. entry.name
+    Row.TextColor3 = Color3.fromRGB(210, 210, 225)
+    Row.TextSize = 13
+    Row.Font = Enum.Font.Gotham
+    Row.TextXAlignment = Enum.TextXAlignment.Left
+    Row.AutoButtonColor = false
+    Row.LayoutOrder = i
+    Row.Parent = RivalsPage
+    Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 6)
+    Row.MouseButton1Click:Connect(function()
+        deselectAll()
+        Selected = entry
+        TweenService:Create(Row, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(60, 50, 110) }):Play()
+        Row.TextColor3 = Color3.fromRGB(255, 255, 255)
+    end)
+    table.insert(Rows, Row)
+end
+
+local ExecuteBtn = Instance.new("TextButton")
+ExecuteBtn.Size = UDim2.new(1, 0, 0, 40)
+ExecuteBtn.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+ExecuteBtn.Text = "EXECUTE"
+ExecuteBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ExecuteBtn.TextSize = 14
+ExecuteBtn.Font = Enum.Font.GothamBold
+ExecuteBtn.AutoButtonColor = false
+ExecuteBtn.LayoutOrder = #Scripts + 1
+ExecuteBtn.Parent = RivalsPage
+Instance.new("UICorner", ExecuteBtn).CornerRadius = UDim.new(0, 6)
+
+ExecuteBtn.MouseButton1Click:Connect(function()
+    if not Selected or not Selected.source then
+        ExecuteBtn.Text = "SELECT A SCRIPT FIRST"
+        task.wait(1.2); ExecuteBtn.Text = "EXECUTE"; return
+    end
+    ExecuteBtn.Text = "RUNNING " .. Selected.name .. "..."
+    ExecuteBtn.BackgroundColor3 = Color3.fromRGB(200, 160, 60)
+    local ok, err = pcall(Selected.source)
+    if not ok then
+        warn("[Rivals Menu] " .. Selected.name .. " failed: " .. tostring(err))
+        ExecuteBtn.Text = "ERROR — see console"
+        ExecuteBtn.BackgroundColor3 = Color3.fromRGB(200, 70, 70)
+    else
+        ExecuteBtn.Text = "EXECUTED " .. Selected.name
+        ExecuteBtn.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+    end
+    task.wait(1.5)
+    ExecuteBtn.Text = "EXECUTE"
+    ExecuteBtn.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+end)
+
+-- ========== UNIVERSAL PAGE ==========
+local HitboxToggle = Instance.new("TextButton")
+HitboxToggle.Size = UDim2.new(1, 0, 0, 40)
+HitboxToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+HitboxToggle.Text = "Hitbox: OFF"
+HitboxToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+HitboxToggle.TextSize = 14
+HitboxToggle.Font = Enum.Font.GothamBold
+HitboxToggle.AutoButtonColor = false
+HitboxToggle.LayoutOrder = 1
+HitboxToggle.Parent = UniversalPage
+Instance.new("UICorner", HitboxToggle).CornerRadius = UDim.new(0, 6)
+
+local HitboxSizeLabel = Instance.new("TextLabel")
+HitboxSizeLabel.Size = UDim2.new(1, 0, 0, 22)
+HitboxSizeLabel.BackgroundTransparency = 1
+HitboxSizeLabel.Text = "Hitbox Size: " .. tostring(Hitbox.Size)
+HitboxSizeLabel.TextColor3 = Color3.fromRGB(220, 220, 230)
+HitboxSizeLabel.TextSize = 12
+HitboxSizeLabel.Font = Enum.Font.Gotham
+HitboxSizeLabel.TextXAlignment = Enum.TextXAlignment.Left
+HitboxSizeLabel.LayoutOrder = 2
+HitboxSizeLabel.Parent = UniversalPage
+
+local HitboxSlider = Instance.new("Frame")
+HitboxSlider.Size = UDim2.new(1, 0, 0, 24)
+HitboxSlider.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+HitboxSlider.LayoutOrder = 3
+HitboxSlider.Parent = UniversalPage
+Instance.new("UICorner", HitboxSlider).CornerRadius = UDim.new(0, 6)
+
+local HitboxFill = Instance.new("Frame")
+HitboxFill.Size = UDim2.new((Hitbox.Size - 2) / 28, 0, 1, 0)
+HitboxFill.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+HitboxFill.Parent = HitboxSlider
+Instance.new("UICorner", HitboxFill).CornerRadius = UDim.new(0, 6)
+
+local HitboxKnob = Instance.new("Frame")
+HitboxKnob.Size = UDim2.new(0, 14, 1, 0)
+HitboxKnob.BackgroundColor3 = Color3.fromRGB(240, 240, 250)
+HitboxKnob.Position = UDim2.new((Hitbox.Size - 2) / 28, -7, 0, 0)
+HitboxKnob.Parent = HitboxSlider
+Instance.new("UICorner", HitboxKnob).CornerRadius = UDim.new(0, 4)
+
+HitboxToggle.MouseButton1Click:Connect(function()
+    if Hitbox.Enabled then
+        Hitbox.Stop()
+        HitboxToggle.Text = "Hitbox: OFF"
+        HitboxToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+    else
+        Hitbox.Start()
+        HitboxToggle.Text = "Hitbox: ON (size " .. tostring(Hitbox.Size) .. ")"
+        HitboxToggle.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+    end
+end)
+
+do
+    local dragging = false
+    local function update(px)
+        local abs = HitboxSlider.AbsolutePosition.X
+        local sx = HitboxSlider.AbsoluteSize.X
+        local t = math.clamp((px - abs) / sx, 0, 1)
+        local val = math.floor(2 + t * 28 + 0.5)
+        Hitbox.SetSize(val)
+        HitboxFill.Size = UDim2.new((val - 2) / 28, 0, 1, 0)
+        HitboxKnob.Position = UDim2.new((val - 2) / 28, -7, 0, 0)
+        HitboxSizeLabel.Text = "Hitbox Size: " .. tostring(val)
+        if Hitbox.Enabled then HitboxToggle.Text = "Hitbox: ON (size " .. tostring(val) .. ")" end
+    end
+    HitboxSlider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; update(input.Position.X) end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then update(input.Position.X) end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+end
+
+local RageToggle = Instance.new("TextButton")
+RageToggle.Size = UDim2.new(1, 0, 0, 40)
+RageToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+RageToggle.Text = "Classic Rage: OFF [Y]"
+RageToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+RageToggle.TextSize = 14
+RageToggle.Font = Enum.Font.GothamBold
+RageToggle.AutoButtonColor = false
+RageToggle.LayoutOrder = 10
+RageToggle.Parent = UniversalPage
+Instance.new("UICorner", RageToggle).CornerRadius = UDim.new(0, 6)
+
+local function makeStepper(label, initial, min, max, step, order, onchange)
+    local holder = Instance.new("Frame")
+    holder.Size = UDim2.new(1, 0, 0, 32)
+    holder.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+    holder.LayoutOrder = order
+    holder.Parent = UniversalPage
+    Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 6)
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -110, 1, 0)
+    lbl.Position = UDim2.new(0, 10, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label .. ": " .. string.format("%.2f", initial)
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 230)
+    lbl.TextSize = 12
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = holder
+
+    local minus = Instance.new("TextButton")
+    minus.Size = UDim2.new(0, 28, 0, 24)
+    minus.Position = UDim2.new(1, -94, 0, 4)
+    minus.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+    minus.Text = "−"
+    minus.TextColor3 = Color3.fromRGB(240, 240, 250)
+    minus.TextSize = 14
+    minus.Font = Enum.Font.GothamBold
+    minus.AutoButtonColor = false
+    minus.Parent = holder
+    Instance.new("UICorner", minus).CornerRadius = UDim.new(0, 4)
+
+    local plus = Instance.new("TextButton")
+    plus.Size = UDim2.new(0, 28, 0, 24)
+    plus.Position = UDim2.new(1, -60, 0, 4)
+    plus.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+    plus.Text = "+"
+    plus.TextColor3 = Color3.fromRGB(240, 240, 250)
+    plus.TextSize = 14
+    plus.Font = Enum.Font.GothamBold
+    plus.AutoButtonColor = false
+    plus.Parent = holder
+    Instance.new("UICorner", plus).CornerRadius = UDim.new(0, 4)
+
+    local val = initial
+    local function set(nv)
+        val = math.clamp(nv, min, max)
+        lbl.Text = label .. ": " .. string.format("%.2f", val)
+        onchange(val)
+    end
+    set(val)
+    minus.MouseButton1Click:Connect(function() set(val - step) end)
+    plus.MouseButton1Click:Connect(function() set(val + step) end)
+end
+
+makeStepper("Interval (s)", Rage.Interval, 0.05, 5, 0.05, 11, function(v) Rage.Interval = v end)
+makeStepper("Behind (s)", Rage.BehindDuration, 0.1, 5, 0.1, 12, function(v) Rage.BehindDuration = v end)
+makeStepper("Distance", Rage.Distance, 1, 12, 0.5, 13, function(v) Rage.Distance = v end)
+
+local function ToggleRage()
+    if Rage.Enabled then
+        Rage.Stop()
+        RageToggle.Text = "Classic Rage: OFF [Y]"
+        RageToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+    else
+        Rage.Start()
+        RageToggle.Text = "Classic Rage: ON [Y]"
+        RageToggle.BackgroundColor3 = Color3.fromRGB(200, 70, 70)
+    end
+end
+
+RageToggle.MouseButton1Click:Connect(ToggleRage)
+
+-- ========== WHITELIST PAGE (multi-select) ==========
+local WLHeader = Instance.new("TextLabel")
+WLHeader.Size = UDim2.new(1, 0, 0, 22)
+WLHeader.BackgroundTransparency = 1
+WLHeader.Text = "Toggle players to whitelist (skip Rage/Hitbox)"
+WLHeader.TextColor3 = Color3.fromRGB(180, 180, 200)
+WLHeader.TextSize = 11
+WLHeader.Font = Enum.Font.Gotham
+WLHeader.TextXAlignment = Enum.TextXAlignment.Left
+WLHeader.Parent = WhitelistPage
+
+local WLScroll = Instance.new("ScrollingFrame")
+WLScroll.Size = UDim2.new(1, 0, 0, 240)
+WLScroll.Position = UDim2.new(0, 0, 0, 26)
+WLScroll.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+WLScroll.BorderSizePixel = 0
+WLScroll.ScrollBarThickness = 5
+WLScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+WLScroll.Parent = WhitelistPage
+Instance.new("UICorner", WLScroll).CornerRadius = UDim.new(0, 6)
+local WLListLayout = Instance.new("UIListLayout")
+WLListLayout.Padding = UDim.new(0, 4)
+WLListLayout.Parent = WLScroll
+
+local function refreshWhitelistList()
+    for _, c in ipairs(WLScroll:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+    local players = Players:GetPlayers()
+    table.sort(players, function(a, b) return a.Name:lower() < b.Name:lower() end)
+    for i, plr in ipairs(players) do
+        if plr ~= LocalPlayer then
+            local row = Instance.new("TextButton")
+            row.Size = UDim2.new(1, -8, 0, 32)
+            row.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+            row.Text = "  [ ] " .. plr.Name
+            row.TextColor3 = Color3.fromRGB(220, 220, 235)
+            row.TextSize = 12
+            row.Font = Enum.Font.Gotham
+            row.TextXAlignment = Enum.TextXAlignment.Left
+            row.AutoButtonColor = false
+            row.LayoutOrder = i
+            row.Parent = WLScroll
+            Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
+
+            if Whitelist.Has(plr) then
+                row.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+                row.TextColor3 = Color3.fromRGB(255, 255, 255)
+                row.Text = "  [x] " .. plr.Name
+            end
+
+            row.MouseButton1Click:Connect(function()
+                if Whitelist.Has(plr) then Whitelist.Remove(plr.Name)
+                else Whitelist.Add(plr.Name) end
+                refreshWhitelistList()
+            end)
+        end
+    end
+    WLScroll.CanvasSize = UDim2.new(0, 0, 0, math.max((#players - 1) * 36, 4))
+end
+
+-- ========== TELEPORT PAGE ==========
+local TPHeader = Instance.new("TextLabel")
+TPHeader.Size = UDim2.new(1, 0, 0, 22)
+TPHeader.BackgroundTransparency = 1
+TPHeader.Text = "Players on server (click to select)"
+TPHeader.TextColor3 = Color3.fromRGB(180, 180, 200)
+TPHeader.TextSize = 11
+TPHeader.Font = Enum.Font.Gotham
+TPHeader.TextXAlignment = Enum.TextXAlignment.Left
+TPHeader.Parent = TeleportPage
+
+local TPScroll = Instance.new("ScrollingFrame")
+TPScroll.Size = UDim2.new(1, 0, 0, 200)
+TPScroll.Position = UDim2.new(0, 0, 0, 26)
+TPScroll.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+TPScroll.BorderSizePixel = 0
+TPScroll.ScrollBarThickness = 5
+TPScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+TPScroll.Parent = TeleportPage
+Instance.new("UICorner", TPScroll).CornerRadius = UDim.new(0, 6)
+local TPList = Instance.new("UIListLayout")
+TPList.Padding = UDim.new(0, 4)
+TPList.Parent = TPScroll
+
+local TPButton = Instance.new("TextButton")
+TPButton.Size = UDim2.new(1, 0, 0, 40)
+TPButton.Position = UDim2.new(0, 0, 0, 234)
+TPButton.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+TPButton.Text = "TELEPORT [K]"
+TPButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+TPButton.TextSize = 14
+TPButton.Font = Enum.Font.GothamBold
+TPButton.AutoButtonColor = false
+TPButton.Parent = TeleportPage
+Instance.new("UICorner", TPButton).CornerRadius = UDim.new(0, 6)
+
+local tpSelected = nil
+local function refreshTPList()
+    for _, c in ipairs(TPScroll:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+    local targets = Teleport.GetTargets()
+    for i, t in ipairs(targets) do
+        local row = Instance.new("TextButton")
+        row.Size = UDim2.new(1, -8, 0, 32)
+        row.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+        row.Text = string.format("  %s   [%.0f studs]", t.player.Name, t.distance)
+        row.TextColor3 = Color3.fromRGB(220, 220, 235)
+        row.TextSize = 12
+        row.Font = Enum.Font.Gotham
+        row.TextXAlignment = Enum.TextXAlignment.Left
+        row.AutoButtonColor = false
+        row.LayoutOrder = i
+        row.Parent = TPScroll
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
+        if tpSelected == t.player then
+            row.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+            row.TextColor3 = Color3.fromRGB(255, 255, 255)
+        end
+        row.MouseButton1Click:Connect(function()
+            tpSelected = t.player
+            for _, r in ipairs(TPScroll:GetChildren()) do
+                if r:IsA("TextButton") then
+                    TweenService:Create(r, TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(28, 28, 34) }):Play()
+                    r.TextColor3 = Color3.fromRGB(220, 220, 235)
+                end
+            end
+            TweenService:Create(row, TweenInfo.new(0.12), { BackgroundColor3 = Color3.fromRGB(60, 50, 110) }):Play()
+            row.TextColor3 = Color3.fromRGB(255, 255, 255)
+        end)
+    end
+    TPScroll.CanvasSize = UDim2.new(0, 0, 0, math.max(#targets * 36, 4))
+end
+
+-- ========== REFRESH LOOP ==========
+local function refreshAllLists()
+    refreshWhitelistList()
+    refreshTPList()
+end
+
+local refreshLoop = task.spawn(function()
+    while ScreenGui.Parent and not MenuState.closed do
+        refreshAllLists()
+        task.wait(2)
+    end
+end)
+
+local function DoTeleport()
+    local target = tpSelected
+    -- If no one is selected in the UI, fall back to nearest valid target
+    if not target then
+        local targets = Teleport.GetTargets()
+        if #targets > 0 then
+            target = targets[1].player
+        end
+    end
+
+    if not target then
+        TPButton.Text = "NO TARGET FOUND"
+        task.wait(1.2); TPButton.Text = "TELEPORT [K]"; return
+    end
+    if not target.Character or not target.Character:FindFirstChild("HumanoidRootPart") then
+        TPButton.Text = "PLAYER HAS NO CHARACTER"
+        task.wait(1.2); TPButton.Text = "TELEPORT [K]"; return
+    end
+
+    TPButton.Text = "TELEPORTING..."
+    TPButton.BackgroundColor3 = Color3.fromRGB(200, 160, 60)
+    local ok = Teleport.GoTo(target)
+    if ok then
+        TPButton.Text = "TELEPORTED TO " .. target.Name
+        TPButton.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+    else
+        TPButton.Text = "TELEPORT FAILED"
+        TPButton.BackgroundColor3 = Color3.fromRGB(200, 70, 70)
+    end
+    task.wait(1.5); TPButton.Text = "TELEPORT [K]"
+    TPButton.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+end
+
+TPButton.MouseButton1Click:Connect(DoTeleport)
+
+-- ========== KEYBINDS ==========
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed or MenuState.closed then return end
+    if input.KeyCode == Enum.KeyCode.Y then
+        ToggleRage()
+    elseif input.KeyCode == Enum.KeyCode.K then
+        DoTeleport()
+    end
+end)
+
+-- ========== OPEN / CLOSE / MINIMIZE ==========
+local ExpandedHeight = 64 + 30 + 12 + 6 + 330 + 24
+local function SetOpen(state)
+    MenuState.open = state
+    TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 440, 0, state and ExpandedHeight or 60),
+    }):Play()
+    ToggleBtn.Text = state and "▴" or "▾"
+    TabBar.Visible = state
+    Body.Visible = state
+end
+Body.Visible = false
+TabBar.Visible = false
+ToggleBtn.MouseButton1Click:Connect(function() SetOpen(not MenuState.open) end)
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then SetOpen(not MenuState.open) end
+end)
+
+local function SetMinimized(state)
+    if MenuState.closed then return end
+    MenuState.minimized = state
+    if state then
+        SetOpen(false)
+        TweenService:Create(Main, TweenInfo.new(0.22, Enum.EasingStyle.Quart), {
+            Size = UDim2.new(0, 140, 0, 36),
+        }):Play()
+        TitleBar.Visible = true
+        Title.Text = "Rivals"
+        SubTitle.Visible = false
+        MinimizeBtn.Visible = false
+        CloseBtn.Visible = false
+        ToggleBtn.Text = "▢"
+        ToggleBtn.Position = UDim2.new(1, -36, 0, 4)
+        TitleBar.Size = UDim2.new(1, 0, 0, 36)
+        Title.Position = UDim2.new(0, 12, 0, 8)
+        Title.Size = UDim2.new(1, -50, 0, 20)
+    else
+        TweenService:Create(Main, TweenInfo.new(0.22, Enum.EasingStyle.Quart), {
+            Size = UDim2.new(0, 440, 0, 60),
+        }):Play()
+        TitleBar.Size = UDim2.new(1, 0, 0, 60)
+        Title.Text = "Rivals • Script Menu"
+        Title.Position = UDim2.new(0, 14, 0, 8)
+        Title.Size = UDim2.new(1, -140, 0, 30)
+        SubTitle.Visible = true
+        MinimizeBtn.Visible = true
+        CloseBtn.Visible = true
+        ToggleBtn.Text = "▾"
+        ToggleBtn.Position = UDim2.new(1, -36, 0, 16)
+    end
+end
+MinimizeBtn.MouseButton1Click:Connect(function() SetMinimized(true) end)
+ToggleBtn.MouseButton1Click:Connect(function()
+    if MenuState.minimized then SetMinimized(false) end
+end)
+
+local function CloseMenu()
+    if MenuState.closed then return end
+    MenuState.closed = true
+    pcall(function() Hitbox.Stop() end)
+    pcall(function() Rage.Stop() end)
+    if refreshLoop and coroutine.status(refreshLoop) ~= "dead" then
+        pcall(function() task.cancel(refreshLoop) end)
+    end
+    ScreenGui:Destroy()
+    print("[Rivals Menu] closed")
+end
+CloseBtn.MouseButton1Click:Connect(CloseMenu)
+
+-- ========== DRAG ==========
+do
+    local dragging, dragStart, startPos
+    TitleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true; dragStart = input.Position; startPos = Main.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local d = input.Position - dragStart
+            Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                                      startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+end
+
+print("[Rivals Menu] loaded — Keybinds: [Y] Rage, [K] TP")
