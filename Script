@@ -803,6 +803,195 @@ local function refreshTPList()
     TPScroll.CanvasSize = UDim2.new(0, 0, 0, math.max(#targets * 36, 4))
 end
 
+-- ========== MOVEMENT: FLY / NOCLIP ==========
+local Movement = {}
+Movement.Fly = { Enabled = false, Speed = 60, _bv = nil, _bg = nil, _conn = nil }
+Movement.Noclip = { Enabled = false, _conn = nil }
+
+function Movement.SetFly(state)
+    if Movement.Fly.Enabled == state then return end
+    Movement.Fly.Enabled = state
+
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+
+    if state and hrp then
+        -- Attachment + LinearVelocity（Rivals の物理検証に乗る方式）
+        local att = Instance.new("Attachment")
+        att.Name = "FlyAtt"
+        att.Parent = hrp
+
+        local lv = Instance.new("LinearVelocity")
+        lv.Name = "FlyLV"
+        lv.RelativeTo = Enum.ActuatorRelativeTo.World
+        lv.MaxForce = math.huge
+        lv.VectorVelocity = Vector3.zero
+        lv.Attachment0 = att
+        lv.Parent = hrp
+
+        Movement.Fly._bv = lv
+        Movement.Fly._bg = att
+
+        Movement.Fly._conn = RunService.RenderStepped:Connect(function()
+            if not Movement.Fly.Enabled then return end
+            local c = LocalPlayer.Character
+            local root = c and c:FindFirstChild("HumanoidRootPart")
+            if not root then return end
+            local cam = Workspace.CurrentCamera
+            if not cam then return end
+
+            local look  = cam.CFrame.LookVector
+            local right = cam.CFrame.RightVector
+            local move  = Vector3.zero
+
+            if UserInputService:IsKeyDown(Enum.KeyCode.W) then move = move + look end
+            if UserInputService:IsKeyDown(Enum.KeyCode.S) then move = move - look end
+            if UserInputService:IsKeyDown(Enum.KeyCode.A) then move = move - right end
+            if UserInputService:IsKeyDown(Enum.KeyCode.D) then move = move + right end
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0, 1, 0) end
+            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then move = move - Vector3.new(0, 1, 0) end
+
+            local speed = math.min(Movement.Fly.Speed, 60)
+            local vel = move.Magnitude > 0 and move.Unit * speed or Vector3.zero
+            if Movement.Fly._bv then Movement.Fly._bv.VectorVelocity = vel end
+        end)
+    else
+        if Movement.Fly._conn then Movement.Fly._conn:Disconnect(); Movement.Fly._conn = nil end
+        if Movement.Fly._bv then Movement.Fly._bv:Destroy(); Movement.Fly._bv = nil end
+        if Movement.Fly._bg then Movement.Fly._bg:Destroy(); Movement.Fly._bg = nil end
+    end
+end
+
+function Movement.SetNoclip(state)
+    if Movement.Noclip.Enabled == state then return end
+    Movement.Noclip.Enabled = state
+
+    if state then
+        Movement.Noclip._conn = RunService.Stepped:Connect(function()
+            if not Movement.Noclip.Enabled then return end
+            local char = LocalPlayer.Character
+            if char then
+                for _, part in ipairs(char:GetDescendants()) do
+                    if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
+                end
+            end
+        end)
+    else
+        if Movement.Noclip._conn then Movement.Noclip._conn:Disconnect(); Movement.Noclip._conn = nil end
+        local char = LocalPlayer.Character
+        if char then
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and not part.CanCollide and part.Name ~= "HumanoidRootPart" then
+                    part.CanCollide = true
+                end
+            end
+        end
+    end
+end
+
+-- ========== FLY / NOCLIP UI (Movement 定義後) ==========
+local FlyToggle = Instance.new("TextButton")
+FlyToggle.Size = UDim2.new(1, 0, 0, 40)
+FlyToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+FlyToggle.Text = "Fly: OFF"
+FlyToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+FlyToggle.TextSize = 14
+FlyToggle.Font = Enum.Font.GothamBold
+FlyToggle.AutoButtonColor = false
+FlyToggle.LayoutOrder = 20
+FlyToggle.Parent = UniversalPage
+Instance.new("UICorner", FlyToggle).CornerRadius = UDim.new(0, 6)
+
+FlyToggle.MouseButton1Click:Connect(function()
+    if Movement.Fly.Enabled then
+        Movement.SetFly(false)
+        FlyToggle.Text = "Fly: OFF"
+        FlyToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+    else
+        Movement.SetFly(true)
+        FlyToggle.Text = "Fly: ON"
+        FlyToggle.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+    end
+end)
+
+local NoclipToggle = Instance.new("TextButton")
+NoclipToggle.Size = UDim2.new(1, 0, 0, 40)
+NoclipToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+NoclipToggle.Text = "Noclip: OFF"
+NoclipToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+NoclipToggle.TextSize = 14
+NoclipToggle.Font = Enum.Font.GothamBold
+NoclipToggle.AutoButtonColor = false
+NoclipToggle.LayoutOrder = 21
+NoclipToggle.Parent = UniversalPage
+Instance.new("UICorner", NoclipToggle).CornerRadius = UDim.new(0, 6)
+
+NoclipToggle.MouseButton1Click:Connect(function()
+    if Movement.Noclip.Enabled then
+        Movement.SetNoclip(false)
+        NoclipToggle.Text = "Noclip: OFF"
+        NoclipToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
+    else
+        Movement.SetNoclip(true)
+        NoclipToggle.Text = "Noclip: ON"
+        NoclipToggle.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+    end
+end)
+
+local FlySpeedLabel = Instance.new("TextLabel")
+FlySpeedLabel.Size = UDim2.new(1, 0, 0, 22)
+FlySpeedLabel.BackgroundTransparency = 1
+FlySpeedLabel.Text = "Fly Speed: " .. tostring(Movement.Fly.Speed)
+FlySpeedLabel.TextColor3 = Color3.fromRGB(220, 220, 230)
+FlySpeedLabel.TextSize = 12
+FlySpeedLabel.Font = Enum.Font.Gotham
+FlySpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
+FlySpeedLabel.LayoutOrder = 22
+FlySpeedLabel.Parent = UniversalPage
+
+local FlySlider = Instance.new("Frame")
+FlySlider.Size = UDim2.new(1, 0, 0, 24)
+FlySlider.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+FlySlider.LayoutOrder = 23
+FlySlider.Parent = UniversalPage
+Instance.new("UICorner", FlySlider).CornerRadius = UDim.new(0, 6)
+
+local FlyFill = Instance.new("Frame")
+FlyFill.Size = UDim2.new((Movement.Fly.Speed - 10) / 290, 0, 1, 0)
+FlyFill.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+FlyFill.Parent = FlySlider
+Instance.new("UICorner", FlyFill).CornerRadius = UDim.new(0, 6)
+
+local FlyKnob = Instance.new("Frame")
+FlyKnob.Size = UDim2.new(0, 14, 1, 0)
+FlyKnob.BackgroundColor3 = Color3.fromRGB(240, 240, 250)
+FlyKnob.Position = UDim2.new((Movement.Fly.Speed - 10) / 290, -7, 0, 0)
+FlyKnob.Parent = FlySlider
+Instance.new("UICorner", FlyKnob).CornerRadius = UDim.new(0, 4)
+
+do
+    local dragging = false
+    local function update(px)
+        local abs = FlySlider.AbsolutePosition.X
+        local sx = FlySlider.AbsoluteSize.X
+        local t = math.clamp((px - abs) / sx, 0, 1)
+        local val = math.floor(10 + t * 70 + 0.5)
+        Movement.Fly.Speed = val
+        FlyFill.Size = UDim2.new((val - 10) / 70, 0, 1, 0)
+        FlyKnob.Position = UDim2.new((val - 10) / 70, -7, 0, 0)
+        FlySpeedLabel.Text = "Fly Speed: " .. tostring(val)
+    end
+    FlySlider.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; update(input.Position.X) end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then update(input.Position.X) end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+end
+
 -- ========== REFRESH LOOP ==========
 local function refreshAllLists()
     refreshWhitelistList()
