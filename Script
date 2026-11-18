@@ -387,7 +387,7 @@ local WhitelistTabBtn = makeTab("Whitelist", 3)
 local TeleportTabBtn  = makeTab("Teleport", 4)
 
 local Body = Instance.new("Frame")
-Body.Size = UDim2.new(1, -16, 0, 0)
+Body.Size = UDim2.new(1, -16, 0, 300)
 Body.Position = UDim2.new(0, 8, 0, 100)
 Body.BackgroundTransparency = 1
 Body.Parent = Main
@@ -400,10 +400,14 @@ local RivalsList = Instance.new("UIListLayout")
 RivalsList.Padding = UDim.new(0, 6)
 RivalsList.Parent = RivalsPage
 
-local UniversalPage = Instance.new("Frame")
+-- UniversalPageをスクロール可能なScrollingFrameに変更
+local UniversalPage = Instance.new("ScrollingFrame")
 UniversalPage.Size = UDim2.new(1, 0, 1, 0)
 UniversalPage.BackgroundTransparency = 1
 UniversalPage.Visible = false
+UniversalPage.BorderSizePixel = 0
+UniversalPage.ScrollBarThickness = 6
+UniversalPage.CanvasSize = UDim2.new(0, 0, 0, 520)
 UniversalPage.Parent = Body
 local UnivList = Instance.new("UIListLayout")
 UnivList.Padding = UDim.new(0, 8)
@@ -574,13 +578,13 @@ do
         if Hitbox.Enabled then HitboxToggle.Text = "Hitbox: ON (size " .. tostring(val) .. ")" end
     end
     HitboxSlider.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; update(input.Position.X) end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; update(input.Position.X) end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then update(input.Position.X) end
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then update(input.Position.X) end
     end)
     UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
     end)
 end
 
@@ -668,7 +672,7 @@ end
 
 RageToggle.MouseButton1Click:Connect(ToggleRage)
 
--- ========== WHITELIST PAGE (multi-select) ==========
+-- ========== WHITELIST PAGE ==========
 local WLHeader = Instance.new("TextLabel")
 WLHeader.Size = UDim2.new(1, 0, 0, 22)
 WLHeader.BackgroundTransparency = 1
@@ -803,72 +807,117 @@ local function refreshTPList()
     TPScroll.CanvasSize = UDim2.new(0, 0, 0, math.max(#targets * 36, 4))
 end
 
--- ========== MOVEMENT: FLY / NOCLIP ==========
-local Movement = {}
-Movement.Fly = { Enabled = false, Speed = 60, _bv = nil, _bg = nil, _conn = nil }
-Movement.Noclip = { Enabled = false, _conn = nil }
+-- ========== MOVEMENT: FLY (スマホ対応・Dream Hub方式) & NOCLIP ==========
+_G.FlyEnabled = false
+_G.FlySpeed = 50
 
-function Movement.SetFly(state)
-    if Movement.Fly.Enabled == state then return end
-    Movement.Fly.Enabled = state
+local FlyMobileGui = nil
+local flyStates = { Up = false, Down = false }
 
-    local char = LocalPlayer.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+local function createFlyMobileGui()
+    if FlyMobileGui then return end
+    FlyMobileGui = Instance.new("ScreenGui")
+    FlyMobileGui.Name = "RivalsFlyControls"
+    FlyMobileGui.ResetOnSpawn = false
+    FlyMobileGui.Parent = CoreGui
 
-    if state and hrp then
-        -- Attachment + LinearVelocity（Rivals の物理検証に乗る方式）
-        local att = Instance.new("Attachment")
-        att.Name = "FlyAtt"
-        att.Parent = hrp
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 70, 0, 140)
+    frame.Position = UDim2.new(1, -90, 0.5, -70)
+    frame.BackgroundTransparency = 1
+    frame.Parent = FlyMobileGui
 
-        local lv = Instance.new("LinearVelocity")
-        lv.Name = "FlyLV"
-        lv.RelativeTo = Enum.ActuatorRelativeTo.World
-        lv.MaxForce = math.huge
-        lv.VectorVelocity = Vector3.zero
-        lv.Attachment0 = att
-        lv.Parent = hrp
+    local function makeBtn(text, pos, color, callback)
+        local btn = Instance.new("TextButton")
+        btn.Size = UDim2.new(0, 60, 0, 60)
+        btn.Position = pos
+        btn.BackgroundColor3 = color
+        btn.BackgroundTransparency = 0.3
+        btn.Text = text
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.TextSize = 16
+        btn.Font = Enum.Font.GothamBold
+        btn.Parent = frame
+        Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
 
-        Movement.Fly._bv = lv
-        Movement.Fly._bg = att
+        btn.MouseButton1Down:Connect(function() callback(true) end)
+        btn.MouseButton1Up:Connect(function() callback(false) end)
+        btn.TouchStart:Connect(function() callback(true) end)
+        btn.TouchEnded:Connect(function() callback(false) end)
+    end
 
-        Movement.Fly._conn = RunService.RenderStepped:Connect(function()
-            if not Movement.Fly.Enabled then return end
-            local c = LocalPlayer.Character
-            local root = c and c:FindFirstChild("HumanoidRootPart")
-            if not root then return end
-            local cam = Workspace.CurrentCamera
-            if not cam then return end
+    makeBtn("UP", UDim2.new(0, 0, 0, 0), Color3.fromRGB(40, 140, 60), function(s) flyStates.Up = s end)
+    makeBtn("DN", UDim2.new(0, 0, 0, 70), Color3.fromRGB(140, 40, 40), function(s) flyStates.Down = s end)
+end
 
-            local look  = cam.CFrame.LookVector
-            local right = cam.CFrame.RightVector
-            local move  = Vector3.zero
-
-            if UserInputService:IsKeyDown(Enum.KeyCode.W) then move = move + look end
-            if UserInputService:IsKeyDown(Enum.KeyCode.S) then move = move - look end
-            if UserInputService:IsKeyDown(Enum.KeyCode.A) then move = move - right end
-            if UserInputService:IsKeyDown(Enum.KeyCode.D) then move = move + right end
-            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0, 1, 0) end
-            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then move = move - Vector3.new(0, 1, 0) end
-
-            local speed = math.min(Movement.Fly.Speed, 60)
-            local vel = move.Magnitude > 0 and move.Unit * speed or Vector3.zero
-            if Movement.Fly._bv then Movement.Fly._bv.VectorVelocity = vel end
-        end)
-    else
-        if Movement.Fly._conn then Movement.Fly._conn:Disconnect(); Movement.Fly._conn = nil end
-        if Movement.Fly._bv then Movement.Fly._bv:Destroy(); Movement.Fly._bv = nil end
-        if Movement.Fly._bg then Movement.Fly._bg:Destroy(); Movement.Fly._bg = nil end
+local function removeFlyMobileGui()
+    if FlyMobileGui then
+        FlyMobileGui:Destroy()
+        FlyMobileGui = nil
     end
 end
 
-function Movement.SetNoclip(state)
-    if Movement.Noclip.Enabled == state then return end
-    Movement.Noclip.Enabled = state
+local flyBodyVelocity, flyBodyGyro
+RunService.RenderStepped:Connect(function()
+    local char = LocalPlayer.Character
+    local cam = Workspace.CurrentCamera
+    if _G.FlyEnabled and char and char:FindFirstChild("HumanoidRootPart") and cam then
+        if not FlyMobileGui then createFlyMobileGui() end
+        local hrp = char.HumanoidRootPart
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        
+        if not flyBodyVelocity or flyBodyVelocity.Parent ~= hrp then
+            flyBodyVelocity = Instance.new("BodyVelocity")
+            flyBodyVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+            flyBodyVelocity.Parent = hrp
+        end
+        if not flyBodyGyro or flyBodyGyro.Parent ~= hrp then
+            flyBodyGyro = Instance.new("BodyGyro")
+            flyBodyGyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+            flyBodyGyro.P = 9000
+            flyBodyGyro.Parent = hrp
+        end
+        
+        flyBodyGyro.CFrame = cam.CFrame
+        local flyVec = Vector3.zero
+        
+        -- PCキーボード入力
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then flyVec = flyVec + cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then flyVec = flyVec - cam.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then flyVec = flyVec - cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then flyVec = flyVec + cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then flyVec = flyVec + Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then flyVec = flyVec - Vector3.new(0, 1, 0) end
 
+        -- スマホ用UP/DNボタン入力
+        if flyStates.Up then flyVec = flyVec + Vector3.new(0, 1, 0) end
+        if flyStates.Down then flyVec = flyVec - Vector3.new(0, 1, 0) end
+
+        -- スマホの移動スティック（MoveDirection）連動
+        if flyVec.Magnitude == 0 and hum and hum.MoveDirection.Magnitude > 0 then
+            local relDir = cam.CFrame:VectorToObjectSpace(hum.MoveDirection)
+            flyVec = (cam.CFrame.LookVector * -relDir.Z) + (cam.CFrame.RightVector * relDir.X)
+        end
+
+        if flyVec.Magnitude > 0 then
+            flyBodyVelocity.Velocity = flyVec.Unit * _G.FlySpeed
+        else
+            flyBodyVelocity.Velocity = Vector3.zero
+        end
+    else
+        removeFlyMobileGui()
+        if flyBodyVelocity then flyBodyVelocity:Destroy(); flyBodyVelocity = nil end
+        if flyBodyGyro then flyBodyGyro:Destroy(); flyBodyGyro = nil end
+    end
+end)
+
+local Noclip = { Enabled = false, _conn = nil }
+function SetNoclip(state)
+    if Noclip.Enabled == state then return end
+    Noclip.Enabled = state
     if state then
-        Movement.Noclip._conn = RunService.Stepped:Connect(function()
-            if not Movement.Noclip.Enabled then return end
+        Noclip._conn = RunService.Stepped:Connect(function()
+            if not Noclip.Enabled then return end
             local char = LocalPlayer.Character
             if char then
                 for _, part in ipairs(char:GetDescendants()) do
@@ -877,7 +926,7 @@ function Movement.SetNoclip(state)
             end
         end)
     else
-        if Movement.Noclip._conn then Movement.Noclip._conn:Disconnect(); Movement.Noclip._conn = nil end
+        if Noclip._conn then Noclip._conn:Disconnect(); Noclip._conn = nil end
         local char = LocalPlayer.Character
         if char then
             for _, part in ipairs(char:GetDescendants()) do
@@ -889,7 +938,7 @@ function Movement.SetNoclip(state)
     end
 end
 
--- ========== FLY / NOCLIP UI (Movement 定義後) ==========
+-- ========== FLY / NOCLIP UI ==========
 local FlyToggle = Instance.new("TextButton")
 FlyToggle.Size = UDim2.new(1, 0, 0, 40)
 FlyToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
@@ -903,14 +952,13 @@ FlyToggle.Parent = UniversalPage
 Instance.new("UICorner", FlyToggle).CornerRadius = UDim.new(0, 6)
 
 FlyToggle.MouseButton1Click:Connect(function()
-    if Movement.Fly.Enabled then
-        Movement.SetFly(false)
-        FlyToggle.Text = "Fly: OFF"
-        FlyToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
-    else
-        Movement.SetFly(true)
+    _G.FlyEnabled = not _G.FlyEnabled
+    if _G.FlyEnabled then
         FlyToggle.Text = "Fly: ON"
         FlyToggle.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
+    else
+        FlyToggle.Text = "Fly: OFF"
+        FlyToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
     end
 end)
 
@@ -927,12 +975,12 @@ NoclipToggle.Parent = UniversalPage
 Instance.new("UICorner", NoclipToggle).CornerRadius = UDim.new(0, 6)
 
 NoclipToggle.MouseButton1Click:Connect(function()
-    if Movement.Noclip.Enabled then
-        Movement.SetNoclip(false)
+    if Noclip.Enabled then
+        SetNoclip(false)
         NoclipToggle.Text = "Noclip: OFF"
         NoclipToggle.BackgroundColor3 = Color3.fromRGB(60, 50, 110)
     else
-        Movement.SetNoclip(true)
+        SetNoclip(true)
         NoclipToggle.Text = "Noclip: ON"
         NoclipToggle.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
     end
@@ -941,7 +989,7 @@ end)
 local FlySpeedLabel = Instance.new("TextLabel")
 FlySpeedLabel.Size = UDim2.new(1, 0, 0, 22)
 FlySpeedLabel.BackgroundTransparency = 1
-FlySpeedLabel.Text = "Fly Speed: " .. tostring(Movement.Fly.Speed)
+FlySpeedLabel.Text = "Fly Speed: " .. tostring(_G.FlySpeed)
 FlySpeedLabel.TextColor3 = Color3.fromRGB(220, 220, 230)
 FlySpeedLabel.TextSize = 12
 FlySpeedLabel.Font = Enum.Font.Gotham
@@ -957,7 +1005,7 @@ FlySlider.Parent = UniversalPage
 Instance.new("UICorner", FlySlider).CornerRadius = UDim.new(0, 6)
 
 local FlyFill = Instance.new("Frame")
-FlyFill.Size = UDim2.new((Movement.Fly.Speed - 10) / 290, 0, 1, 0)
+FlyFill.Size = UDim2.new((_G.FlySpeed - 10) / 290, 0, 1, 0)
 FlyFill.BackgroundColor3 = Color3.fromRGB(80, 160, 90)
 FlyFill.Parent = FlySlider
 Instance.new("UICorner", FlyFill).CornerRadius = UDim.new(0, 6)
@@ -965,7 +1013,7 @@ Instance.new("UICorner", FlyFill).CornerRadius = UDim.new(0, 6)
 local FlyKnob = Instance.new("Frame")
 FlyKnob.Size = UDim2.new(0, 14, 1, 0)
 FlyKnob.BackgroundColor3 = Color3.fromRGB(240, 240, 250)
-FlyKnob.Position = UDim2.new((Movement.Fly.Speed - 10) / 290, -7, 0, 0)
+FlyKnob.Position = UDim2.new((_G.FlySpeed - 10) / 290, -7, 0, 0)
 FlyKnob.Parent = FlySlider
 Instance.new("UICorner", FlyKnob).CornerRadius = UDim.new(0, 4)
 
@@ -975,20 +1023,20 @@ do
         local abs = FlySlider.AbsolutePosition.X
         local sx = FlySlider.AbsoluteSize.X
         local t = math.clamp((px - abs) / sx, 0, 1)
-        local val = math.floor(10 + t * 70 + 0.5)
-        Movement.Fly.Speed = val
-        FlyFill.Size = UDim2.new((val - 10) / 70, 0, 1, 0)
-        FlyKnob.Position = UDim2.new((val - 10) / 70, -7, 0, 0)
+        local val = math.floor(10 + t * 290 + 0.5)
+        _G.FlySpeed = val
+        FlyFill.Size = UDim2.new((val - 10) / 290, 0, 1, 0)
+        FlyKnob.Position = UDim2.new((val - 10) / 290, -7, 0, 0)
         FlySpeedLabel.Text = "Fly Speed: " .. tostring(val)
     end
     FlySlider.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true; update(input.Position.X) end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; update(input.Position.X) end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then update(input.Position.X) end
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then update(input.Position.X) end
     end)
     UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
     end)
 end
 
@@ -1007,7 +1055,6 @@ end)
 
 local function DoTeleport()
     local target = tpSelected
-    -- If no one is selected in the UI, fall back to nearest valid target
     if not target then
         local targets = Teleport.GetTargets()
         if #targets > 0 then
@@ -1065,7 +1112,7 @@ Body.Visible = false
 TabBar.Visible = false
 ToggleBtn.MouseButton1Click:Connect(function() SetOpen(not MenuState.open) end)
 TitleBar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then SetOpen(not MenuState.open) end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then SetOpen(not MenuState.open) end
 end)
 
 local function SetMinimized(state)
@@ -1109,8 +1156,11 @@ end)
 local function CloseMenu()
     if MenuState.closed then return end
     MenuState.closed = true
+    _G.FlyEnabled = false
     pcall(function() Hitbox.Stop() end)
     pcall(function() Rage.Stop() end)
+    pcall(function() SetNoclip(false) end)
+    removeFlyMobileGui()
     if refreshLoop and coroutine.status(refreshLoop) ~= "dead" then
         pcall(function() task.cancel(refreshLoop) end)
     end
@@ -1123,19 +1173,19 @@ CloseBtn.MouseButton1Click:Connect(CloseMenu)
 do
     local dragging, dragStart, startPos
     TitleBar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             dragging = true; dragStart = input.Position; startPos = Main.Position
         end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local d = input.Position - dragStart
             Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
                                       startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
     end)
     UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
     end)
 end
 
