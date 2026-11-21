@@ -264,6 +264,9 @@ local Scripts = {
     { name = "w7w7 lua", type = "loadstring", source = function()
         loadstring(game:HttpGet("https://pastefy.app/XjnTvDVM/raw"))()
     end },
+    { name = "Dick", type = "loadstring", source = function()
+        loadstring(game:HttpGet("https://pastefy.app/RjHTfxBp/raw"))()
+    end },
 }
 
 -- ======================================================================
